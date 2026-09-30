@@ -86,3 +86,16 @@ def test_parse_score_rejects_extra_print_after_json() -> None:
 def test_parse_score_rejects_empty_stdout() -> None:
     with pytest.raises(ValueError, match="empty"):
         parse_score("")
+
+
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity"])
+def test_rejects_non_finite_score(tmp_path: Path, raw: str) -> None:
+    # json.dumps(float("nan")) writes a bare NaN, and json.loads reads it back.
+    # A NaN baseline commits (nothing to compare against) and then every later
+    # compare_scores() against it is False, so no experiment can ever commit.
+    result = tmp_path / "result.json"
+    result.write_text(f'{{"score": {raw}}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="not a finite number"):
+        load_result(result, "")
+    with pytest.raises(ValueError, match="not a finite number"):
+        parse_score(f'{{"score": {raw}}}')
