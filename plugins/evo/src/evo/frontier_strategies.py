@@ -242,10 +242,12 @@ def _pick_softmax(nodes: list[dict], params: dict, metric: str,
     temperature = float(params["temperature"])
     k = min(int(params["k"]), len(nodes))
     scores = [_score_of(n, metric) for n in nodes]
-    # Subtract max for numerical stability.
+    # Subtract max for numerical stability, and stay in log space: exp() of a
+    # gap wider than ~745 * T underflows to 0.0, which would drop that node
+    # from the draw entirely instead of just ranking it last.
     m = max(scores)
-    weights = [math.exp((s - m) / temperature) for s in scores]
-    return _weighted_sample_without_replacement(nodes, weights, k, rng)
+    log_weights = [(s - m) / temperature for s in scores]
+    return _log_weighted_sample_without_replacement(nodes, log_weights, k, rng)
 
 
 def _pick_pareto_per_task(nodes: list[dict], params: dict, metric: str,
@@ -418,16 +420,28 @@ def _weighted_sample_without_replacement(items: list[dict], weights: list[float]
 
     Returns items in sampled order, ranked 1..k.
     """
+    log_weights = [math.log(w) if w > 0 else -math.inf for w in weights]
+    return _log_weighted_sample_without_replacement(items, log_weights, k, rng)
+
+
+def _log_weighted_sample_without_replacement(items: list[dict], log_weights: list[float],
+                                              k: int, rng: random.Random) -> list[dict]:
+    """Same draw as `_weighted_sample_without_replacement`, with weights given
+    as logs. Ranking by log(w) - log(-log(u)) orders items exactly like
+    log(u) / w, but never needs w itself, so tiny weights are not lost.
+
+    Returns items in sampled order, ranked 1..k.
+    """
     if k <= 0 or not items:
         return []
     paired = []
-    for item, w in zip(items, weights):
-        if w <= 0:
+    for item, lw in zip(items, log_weights):
+        if not lw > -math.inf:  # zero weight (or NaN): never drawn
             continue
         u = rng.random()
         if u == 0.0:
             u = 1e-12
-        key = math.log(u) / w
+        key = lw - math.log(-math.log(u))
         paired.append((key, item))
     # Top k by key (largest key = highest priority in this formulation).
     paired.sort(key=lambda x: x[0], reverse=True)

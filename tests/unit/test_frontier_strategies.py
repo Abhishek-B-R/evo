@@ -134,6 +134,22 @@ class TestSoftmax(unittest.TestCase):
         ids = [n["id"] for n in out]
         self.assertEqual(len(ids), len(set(ids)))
 
+    def test_wide_score_gap_still_returns_k(self):
+        # exp((s - max) / T) underflows to 0.0 once the gap passes ~745*T.
+        # Scores in benchmark units (ms, tokens/s) hit that easily; the
+        # trailing nodes must still be drawn, just after the leader.
+        nodes = [
+            {"id": "exp_A", "score": 820.0},
+            {"id": "exp_B", "score": 410.0},
+            {"id": "exp_C", "score": 395.0},
+        ]
+        for metric, first in (("max", "exp_A"), ("min", "exp_C")):
+            for seed in range(20):
+                out, _ = fs.pick(nodes, {"kind": "softmax", "params": {"temperature": 0.5, "k": 3}},
+                                 metric, seed=seed)
+                self.assertEqual(len(out), 3)
+                self.assertEqual(out[0]["id"], first)
+
 
 class TestParetoPerTask(unittest.TestCase):
     def test_preserves_specialists_drops_dominated(self):
