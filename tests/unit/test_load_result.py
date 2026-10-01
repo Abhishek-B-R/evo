@@ -1,11 +1,16 @@
 """Tests for evo.core.load_result and parse_score."""
 from __future__ import annotations
 
+import json
+import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from evo.core import load_result, parse_score
+from evo.core import load_graph, load_result, parse_score
 
 
 def test_uses_file_when_valid(tmp_path: Path) -> None:
@@ -99,3 +104,60 @@ def test_rejects_non_finite_score(tmp_path: Path, raw: str) -> None:
         load_result(result, "")
     with pytest.raises(ValueError, match="not a finite number"):
         parse_score(f'{{"score": {raw}}}')
+
+
+def _evo(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", "from evo.cli import main; import sys; sys.exit(main())", *args],
+        cwd=root, check=False, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "plugins" / "evo" / "src")},
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: git holds files open on Windows")
+@pytest.mark.parametrize(
+    ("trace_scores", "expected"),
+    [([0.5, "NaN", "Infinity"], 0.5), (["NaN", "-Infinity"], None)],
+)
+def test_failed_run_does_not_salvage_non_finite_trace_scores(
+    tmp_path: Path, trace_scores: list, expected: float | None,
+) -> None:
+    # The benchmark score is rejected, so the attempt fails and evo averages the
+    # per-task traces instead. That average lands on the failed node, which
+    # /api/graph serves, so it has to be finite too.
+    for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "T"],
+                ["config", "commit.gpgsign", "false"]):
+        subprocess.run(["git", *cmd], cwd=tmp_path, check=True)
+    (tmp_path / "agent.py").write_text("# agent\n")
+    lines = ["import os, pathlib", "t = pathlib.Path(os.environ['EVO_TRACES_DIR'])",
+             "t.mkdir(parents=True, exist_ok=True)"]
+    for i, raw in enumerate(trace_scores):
+        lines.append(f"(t / 'task_{i}.json').write_text('{{\"task_id\": \"{i}\", \"score\": {raw}}}')")
+    lines.append("pathlib.Path(os.environ['EVO_RESULT_PATH']).write_text('{\"score\": NaN}')")
+    (tmp_path / "benchmark.py").write_text("\n".join(lines) + "\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+
+    try:
+        r = _evo(tmp_path, "init", "--target", "agent.py", "--benchmark", f"{sys.executable} benchmark.py",
+                 "--metric", "max", "--host", "generic", "--per-exp-timeout", "1800")
+        assert r.returncode == 0, r.stderr
+        r = _evo(tmp_path, "new", "--parent", "root", "-m", "h")
+        assert r.returncode == 0, r.stderr
+        graph = load_graph(tmp_path)
+        exp_id = next(nid for nid in graph["nodes"] if nid != "root")
+        r = _evo(tmp_path, "run", exp_id)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "not a finite number" in r.stdout
+
+        node = load_graph(tmp_path)["nodes"][exp_id]
+        assert node["status"] == "failed"
+        assert node.get("score") == expected
+        json.dumps(node, allow_nan=False)
+    finally:
+        pid_file = tmp_path / ".evo" / "dashboard.pid"
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
