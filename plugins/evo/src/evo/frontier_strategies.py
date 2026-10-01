@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -245,8 +246,19 @@ def _pick_softmax(nodes: list[dict], params: dict, metric: str,
     # Subtract max for numerical stability, and stay in log space: exp() of a
     # gap wider than ~745 * T underflows to 0.0, which would drop that node
     # from the draw entirely instead of just ranking it last.
-    m = max(scores)
-    log_weights = [(s - m) / temperature for s in scores]
+    # Every node stays drawable: anything that has no usable log weight
+    # (missing score, NaN, or a gap so wide it overflows) gets a finite floor
+    # instead, so it ranks last rather than vanishing.
+    floor = -sys.float_info.max
+    ranked = [s for s in scores if s > -math.inf]  # drops NaN and -inf
+    if not ranked:
+        log_weights = [0.0] * len(scores)  # nothing to rank by: uniform
+    elif max(ranked) == math.inf:
+        log_weights = [0.0 if s == math.inf else floor for s in scores]
+    else:
+        m = max(ranked)
+        log_weights = [(s - m) / temperature for s in scores]
+        log_weights = [lw if math.isfinite(lw) else floor for lw in log_weights]
     return _log_weighted_sample_without_replacement(nodes, log_weights, k, rng)
 
 
@@ -441,11 +453,13 @@ def _log_weighted_sample_without_replacement(items: list[dict], log_weights: lis
         u = rng.random()
         if u == 0.0:
             u = 1e-12
-        key = lw - math.log(-math.log(u))
-        paired.append((key, item))
+        noise = -math.log(-math.log(u))
+        # When log weights dwarf the noise, keys tie; the noise itself then
+        # breaks the tie so those items still come out in random order.
+        paired.append((lw + noise, noise, item))
     # Top k by key (largest key = highest priority in this formulation).
-    paired.sort(key=lambda x: x[0], reverse=True)
-    picked = [item for _, item in paired[:k]]
+    paired.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    picked = [item for _, _, item in paired[:k]]
     return [_node_summary(n, i + 1) for i, n in enumerate(picked)]
 
 

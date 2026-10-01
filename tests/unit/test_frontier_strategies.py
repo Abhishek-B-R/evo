@@ -150,6 +150,60 @@ class TestSoftmax(unittest.TestCase):
                 self.assertEqual(len(out), 3)
                 self.assertEqual(out[0]["id"], first)
 
+    def _softmax_ids(self, nodes, temperature, seed, metric="max"):
+        out, _ = fs.pick(nodes, {"kind": "softmax", "params": {"temperature": temperature,
+                                                               "k": len(nodes)}},
+                         metric, seed=seed)
+        return [n["id"] for n in out]
+
+    def test_infinite_leading_score_keeps_every_node(self):
+        # inf - inf is NaN, so the leader used to be skipped and every other
+        # node got a log weight of -inf: a non-empty frontier returned nothing.
+        nodes = [
+            {"id": "exp_A", "score": float("inf")},
+            {"id": "exp_B", "score": 1.0},
+            {"id": "exp_C", "score": 0.5},
+        ]
+        for seed in range(20):
+            ids = self._softmax_ids(nodes, 1.0, seed)
+            self.assertEqual(sorted(ids), ["exp_A", "exp_B", "exp_C"])
+            self.assertEqual(ids[0], "exp_A")
+
+    def test_nodes_without_scores_are_drawn_uniformly(self):
+        nodes = [
+            {"id": "exp_A", "score": None},
+            {"id": "exp_B"},
+            {"id": "exp_C", "score": float("nan")},
+        ]
+        firsts = set()
+        for seed in range(50):
+            ids = self._softmax_ids(nodes, 1.0, seed)
+            self.assertEqual(sorted(ids), ["exp_A", "exp_B", "exp_C"])
+            firsts.add(ids[0])
+        self.assertEqual(firsts, {"exp_A", "exp_B", "exp_C"})
+
+    def test_gap_that_overflows_still_returns_every_node(self):
+        # (s - m) / T overflows to -inf here even though both scores are finite.
+        nodes = [
+            {"id": "exp_A", "score": 1e308},
+            {"id": "exp_B", "score": -1e308},
+        ]
+        for seed in range(20):
+            self.assertEqual(self._softmax_ids(nodes, 0.5, seed), ["exp_A", "exp_B"])
+
+    def test_trailing_nodes_follow_random_order_not_input_order(self):
+        # A gap of 1e20 swallows the Gumbel noise, so the trailing keys are
+        # equal; they must still come out shuffled.
+        nodes = [{"id": "exp_A", "score": 1e20}] + [
+            {"id": f"exp_{c}", "score": 0.0} for c in "BCD"
+        ]
+        orders = set()
+        for seed in range(50):
+            ids = self._softmax_ids(nodes, 1.0, seed)
+            self.assertEqual(ids[0], "exp_A")
+            orders.add(tuple(ids[1:]))
+        self.assertEqual(len(orders), 6)
+
 
 class TestParetoPerTask(unittest.TestCase):
     def test_preserves_specialists_drops_dominated(self):
