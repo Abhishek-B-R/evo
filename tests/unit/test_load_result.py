@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from evo.cli import _stop_dashboard
 from evo.core import load_graph, load_result, parse_score
 
 
@@ -155,9 +155,6 @@ def test_failed_run_does_not_salvage_non_finite_trace_scores(
         assert node.get("score") == expected
         json.dumps(node, allow_nan=False)
     finally:
-        pid_file = tmp_path / ".evo" / "dashboard.pid"
-        if pid_file.exists():
-            try:
-                os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
-            except (OSError, ValueError):
-                pass
+        # Stop the supervisor, not just its dashboard child: killing only the
+        # child makes the supervisor respawn it on another port.
+        _stop_dashboard(tmp_path)
