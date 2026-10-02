@@ -169,6 +169,21 @@ class TestSoftmax(unittest.TestCase):
             self.assertEqual(sorted(ids), ["exp_A", "exp_B", "exp_C"])
             self.assertEqual(ids[0], "exp_A")
 
+    def test_finite_scores_keep_their_ranking_behind_infinite_ones(self):
+        nodes = [
+            {"id": "exp_A", "score": -100.0},
+            {"id": "exp_B", "score": float("inf")},
+            {"id": "exp_C", "score": 100.0},
+            {"id": "exp_D", "score": float("inf")},
+        ]
+        for seed in range(20):
+            out, _ = fs.pick(nodes, {"kind": "softmax", "params": {"temperature": 1.0, "k": 4}},
+                             "max", seed=seed)
+            ids = [n["id"] for n in out]
+            self.assertEqual(sorted(ids[:2]), ["exp_B", "exp_D"])
+            self.assertEqual(ids[2:], ["exp_C", "exp_A"])
+            self.assertEqual([n["rank"] for n in out], [1, 2, 3, 4])
+
     def test_nodes_without_scores_are_drawn_uniformly(self):
         nodes = [
             {"id": "exp_A", "score": None},

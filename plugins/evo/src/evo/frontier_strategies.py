@@ -243,6 +243,14 @@ def _pick_softmax(nodes: list[dict], params: dict, metric: str,
     temperature = float(params["temperature"])
     k = min(int(params["k"]), len(nodes))
     scores = [_score_of(n, metric) for n in nodes]
+    if math.inf in scores:
+        # Infinite scores outrank everything: draw those first, then run the
+        # usual softmax over the rest so finite scores keep their ranking.
+        top = [n for n, s in zip(nodes, scores) if s == math.inf]
+        rest = [n for n, s in zip(nodes, scores) if s != math.inf]
+        picked = _log_weighted_sample_without_replacement(top, [0.0] * len(top), k, rng)
+        picked += _pick_softmax(rest, {**params, "k": k - len(picked)}, metric, outcomes, rng)
+        return [{**n, "rank": i + 1} for i, n in enumerate(picked)]
     # Subtract max for numerical stability, and stay in log space: exp() of a
     # gap wider than ~745 * T underflows to 0.0, which would drop that node
     # from the draw entirely instead of just ranking it last.
@@ -253,8 +261,6 @@ def _pick_softmax(nodes: list[dict], params: dict, metric: str,
     ranked = [s for s in scores if s > -math.inf]  # drops NaN and -inf
     if not ranked:
         log_weights = [0.0] * len(scores)  # nothing to rank by: uniform
-    elif max(ranked) == math.inf:
-        log_weights = [0.0 if s == math.inf else floor for s in scores]
     else:
         m = max(ranked)
         log_weights = [(s - m) / temperature for s in scores]
